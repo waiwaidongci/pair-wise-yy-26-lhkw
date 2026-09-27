@@ -24,6 +24,7 @@ python -m unittest discover -s tests -v
 - `GET /api/duplicates?product_id=...&version=...`
 - `POST /api/members`、`POST /api/evidence`
 - `POST /api/fixes`、`POST /api/extensions`
+- `POST /api/fix-acceptances`、`POST /api/reports/{id}/fix-acceptances/{acceptance_id}`
 - `POST /api/reports/{id}/status`
 - `POST /api/advisories`、`GET /api/reports/{id}/advisory?user_id=...`
 - `POST /api/reports/{id}/publish`
@@ -31,3 +32,7 @@ python -m unittest discover -s tests -v
 - `GET /api/reports/{id}/notifications`
 
 状态流转限制为 `new -> triaged -> fixing -> resolved -> published`，拒绝或回到修复中也有显式规则。披露日期早于保密期限时请求会失败，不会只修改显示状态。
+
+## 修复验收
+
+`fixing -> resolved` 必须经过两步：维护者通过 `/api/fix-acceptances` 提交当前修复计划的完成确认，协调员再通过 `/api/reports/{id}/fix-acceptances/{acceptance_id}` 确认通过。每条验收记录保存提交时的计划版本、计划内容与目标日期快照、双方说明和时间戳，报告详情中的 `fix_acceptances` 保留完整验收历史。维护者随后修改计划内容或目标日期会使计划版本递增、未完成的验收记录作废（`invalidated`）并通知协调员重新确认；报告从 `resolved` 回到 `fixing` 时验收同样失效。已作废的记录仍可查看，但不能再用于解决报告。

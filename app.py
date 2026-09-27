@@ -46,6 +46,9 @@ class Handler(BaseHTTPRequestHandler):
             if path=="/api/members": self.db.add_member(int(b.get("report_id",0)),int(b.get("user_id",0)),str(b.get("member_role","maintainer")),int(b.get("added_by",0))); return self._json(201,{"ok":True})
             if path=="/api/evidence": return self._json(201,{"ok":True,"id":self.db.add_evidence(int(b.get("report_id",0)),str(b.get("name","")),str(b.get("content","")),str(b.get("classification","private")),int(b.get("uploaded_by",0)))})
             if path=="/api/fixes": return self._json(201,{"ok":True,"id":self.db.set_fix_plan(int(b.get("report_id",0)),int(b.get("maintainer_id",0)),str(b.get("plan","")),b.get("target_date"))})
+            if path=="/api/fix-acceptances": return self._json(201,{"ok":True,"id":self.db.submit_fix_completion(int(b.get("report_id",0)),int(b.get("maintainer_id",0)),str(b.get("note","")))})
+            if len(parts)==5 and parts[:2]==["api","reports"] and parts[3]=="fix-acceptances":
+                self.db.approve_fix_acceptance(int(parts[2]),int(parts[4]),int(b.get("coordinator_id",0)),str(b.get("note",""))); return self._json(200,{"ok":True})
             if path=="/api/extensions": return self._json(201,{"ok":True,"id":self.db.extend_embargo(int(b.get("report_id",0)),str(b.get("new_deadline","")),str(b.get("reason","")),int(b.get("coordinator_id",0)))})
             if path=="/api/advisories": return self._json(201,{"ok":True,"id":self.db.create_advisory_draft(int(b.get("report_id",0)),str(b.get("content","")),int(b.get("user_id",0)))})
             if len(parts)==4 and parts[:2]==["api","reports"] and parts[3]=="status": self.db.set_status(int(parts[2]),str(b.get("status","")),int(b.get("user_id",0)),str(b.get("note",""))); return self._json(200,{"ok":True})
