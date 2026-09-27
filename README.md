@@ -16,7 +16,7 @@ python app.py
 python -m unittest discover -s tests -v
 ```
 
-测试覆盖：创建报告、加入维护者、分级、提交修复计划、解决、阻止提前披露、到期披露并读取公告；同时验证外部用户无权查看、相同产品版本会触发重复报告，以及维护者看不到协调员专用材料。
+测试覆盖：创建报告、加入维护者、分级、提交修复计划、修复验收、解决、阻止提前披露、到期披露并读取公告；同时验证外部用户无权查看、相同产品版本会触发重复报告，以及维护者看不到协调员专用材料。
 
 ## 接口
 
@@ -25,9 +25,12 @@ python -m unittest discover -s tests -v
 - `POST /api/members`、`POST /api/evidence`
 - `POST /api/fixes`、`POST /api/extensions`
 - `POST /api/reports/{id}/status`
+- `POST /api/reports/{id}/acceptances`、`POST /api/reports/{id}/acceptances/{id}/confirm`
 - `POST /api/advisories`、`GET /api/reports/{id}/advisory?user_id=...`
 - `POST /api/reports/{id}/publish`
 - `GET /api/reports/{id}?user_id=...`
 - `GET /api/reports/{id}/notifications`
 
 状态流转限制为 `new -> triaged -> fixing -> resolved -> published`，拒绝或回到修复中也有显式规则。披露日期早于保密期限时请求会失败，不会只修改显示状态。
+
+`fixing -> resolved` 必须先完成修复验收：维护者对当前修复计划提交完成确认，协调员验收通过后才能标记为已解决。维护者修改计划内容或目标日期会使旧验收失效并通知协调员重新确认，全部验收历史（含计划版本、提交人、确认人）保留在报告详情中。

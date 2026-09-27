@@ -49,6 +49,8 @@ class Handler(BaseHTTPRequestHandler):
             if path=="/api/extensions": return self._json(201,{"ok":True,"id":self.db.extend_embargo(int(b.get("report_id",0)),str(b.get("new_deadline","")),str(b.get("reason","")),int(b.get("coordinator_id",0)))})
             if path=="/api/advisories": return self._json(201,{"ok":True,"id":self.db.create_advisory_draft(int(b.get("report_id",0)),str(b.get("content","")),int(b.get("user_id",0)))})
             if len(parts)==4 and parts[:2]==["api","reports"] and parts[3]=="status": self.db.set_status(int(parts[2]),str(b.get("status","")),int(b.get("user_id",0)),str(b.get("note",""))); return self._json(200,{"ok":True})
+            if len(parts)==4 and parts[:2]==["api","reports"] and parts[3]=="acceptances": return self._json(201,{"ok":True,"id":self.db.submit_fix_acceptance(int(parts[2]),int(b.get("maintainer_id",0)),str(b.get("note","")))})
+            if len(parts)==6 and parts[:2]==["api","reports"] and parts[3]=="acceptances" and parts[5]=="confirm": self.db.confirm_fix_acceptance(int(parts[2]),int(parts[4]),int(b.get("coordinator_id",0))); return self._json(200,{"ok":True})
             if len(parts)==4 and parts[:2]==["api","reports"] and parts[3]=="publish": self.db.publish_report(int(parts[2]),int(b.get("coordinator_id",0)),b.get("as_of")); return self._json(200,{"ok":True})
             self._json(404,{"ok":False,"error":"接口不存在"})
         except (DomainError,ValueError) as exc: self._json(400,{"ok":False,"error":str(exc)})

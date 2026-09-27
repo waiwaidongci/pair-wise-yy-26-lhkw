@@ -104,7 +104,22 @@ class VulnerabilityDB:
               plan TEXT NOT NULL,
               target_date TEXT,
               status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','accepted','done')),
+              revision INTEGER NOT NULL DEFAULT 1,
               created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fix_acceptances (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              report_id INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+              plan_id INTEGER NOT NULL REFERENCES fix_plans(id) ON DELETE CASCADE,
+              plan_revision INTEGER NOT NULL,
+              plan TEXT NOT NULL,
+              target_date TEXT,
+              maintainer_id INTEGER NOT NULL REFERENCES users(id),
+              note TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','confirmed','invalidated')),
+              confirmed_by INTEGER REFERENCES users(id),
+              created_at TEXT NOT NULL,
+              resolved_at TEXT
             );
             CREATE TABLE IF NOT EXISTS status_history (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +158,9 @@ class VulnerabilityDB:
             );
             """
         )
+        fix_plan_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(fix_plans)")}
+        if "revision" not in fix_plan_cols:
+            self.conn.execute("ALTER TABLE fix_plans ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
         self.conn.commit()
 
     def seed_demo(self) -> None:
@@ -303,6 +321,11 @@ class VulnerabilityDB:
         )]
         payload["evidence"] = evidence
         payload["fix_plan"] = dict(self.conn.execute("SELECT * FROM fix_plans WHERE report_id=?", (report_id,)).fetchone() or {})
+        payload["acceptances"] = [dict(r) for r in self.conn.execute(
+            "SELECT a.*,m.name AS maintainer_name,c.name AS confirmed_by_name FROM fix_acceptances a "
+            "JOIN users m ON m.id=a.maintainer_id LEFT JOIN users c ON c.id=a.confirmed_by "
+            "WHERE a.report_id=? ORDER BY a.id", (report_id,)
+        )]
         payload["history"] = [dict(r) for r in self.conn.execute("SELECT * FROM status_history WHERE report_id=? ORDER BY id", (report_id,))]
         payload["extensions"] = [dict(r) for r in self.conn.execute("SELECT * FROM extensions WHERE report_id=? ORDER BY id", (report_id,))]
         return payload
@@ -316,6 +339,14 @@ class VulnerabilityDB:
             raise DomainError("报告人不能推进协调状态")
         if new_status not in STATUS_TRANSITIONS.get(report["status"], set()):
             raise DomainError(f"状态不能从 {report['status']} 变为 {new_status}")
+        if report["status"] == "fixing" and new_status == "resolved":
+            plan = self.conn.execute("SELECT * FROM fix_plans WHERE report_id=?", (report_id,)).fetchone()
+            confirmed = plan and self.conn.execute(
+                "SELECT 1 FROM fix_acceptances WHERE plan_id=? AND plan_revision=? AND status='confirmed'",
+                (plan["id"], plan["revision"]),
+            ).fetchone()
+            if not confirmed:
+                raise DomainError("当前修复计划的验收未获协调员确认，不能标记为已解决")
         now = datetime.now().isoformat()
         with self.transaction():
             self.conn.execute("UPDATE reports SET status=?,updated_at=? WHERE id=?", (new_status, now, report_id))
@@ -341,21 +372,89 @@ class VulnerabilityDB:
                 datetime.strptime(target_date, "%Y-%m-%d")
             except ValueError as exc:
                 raise DomainError("目标日期必须使用 YYYY-MM-DD") from exc
+        target_date = target_date or None
+        now = datetime.now().isoformat()
+        existing = self.conn.execute("SELECT * FROM fix_plans WHERE report_id=?", (report_id,)).fetchone()
         with self.transaction():
-            try:
+            if existing is None:
                 cur = self.conn.execute(
                     "INSERT INTO fix_plans(report_id,maintainer_id,plan,target_date,created_at) VALUES(?,?,?,?,?)",
-                    (report_id, maintainer_id, plan.strip(), target_date, datetime.now().isoformat()),
+                    (report_id, maintainer_id, plan.strip(), target_date, now),
                 )
-            except sqlite3.IntegrityError:
-                cur = self.conn.execute(
-                    "UPDATE fix_plans SET maintainer_id=?,plan=?,target_date=?,status='proposed',created_at=? WHERE report_id=?",
-                    (maintainer_id, plan.strip(), target_date, datetime.now().isoformat(), report_id),
-                )
-                plan_id = self.conn.execute("SELECT id FROM fix_plans WHERE report_id=?", (report_id,)).fetchone()["id"]
-            else:
                 plan_id = int(cur.lastrowid)
+            else:
+                changed = existing["plan"] != plan.strip() or (existing["target_date"] or None) != target_date
+                revision = int(existing["revision"]) + 1 if changed else int(existing["revision"])
+                self.conn.execute(
+                    "UPDATE fix_plans SET maintainer_id=?,plan=?,target_date=?,status='proposed',revision=?,created_at=? WHERE report_id=?",
+                    (maintainer_id, plan.strip(), target_date, revision, now, report_id),
+                )
+                plan_id = int(existing["id"])
+                if changed:
+                    self._invalidate_acceptances(report_id, plan_id, revision)
         return int(plan_id)
+
+    def _invalidate_acceptances(self, report_id: int, plan_id: int, new_revision: int) -> None:
+        now = datetime.now().isoformat()
+        cur = self.conn.execute(
+            "UPDATE fix_acceptances SET status='invalidated',resolved_at=? WHERE plan_id=? AND status IN ('pending','confirmed')",
+            (now, plan_id),
+        )
+        if cur.rowcount:
+            self._notify_coordinators(
+                report_id, "acceptance",
+                f"修复计划已更新为第 {new_revision} 版，此前的修复验收已失效，请重新确认",
+            )
+
+    def submit_fix_acceptance(self, report_id: int, maintainer_id: int, note: str = "") -> int:
+        user = self._user(maintainer_id)
+        report = self.conn.execute("SELECT * FROM reports WHERE id=?", (report_id,)).fetchone()
+        if not report:
+            raise DomainError("报告不存在")
+        if user["role"] != "maintainer" or not self._member(report_id, maintainer_id):
+            raise DomainError("只有该报告的维护者可以提交修复验收")
+        if report["status"] != "fixing":
+            raise DomainError("只有修复中的报告可以提交修复验收")
+        plan = self.conn.execute("SELECT * FROM fix_plans WHERE report_id=?", (report_id,)).fetchone()
+        if not plan:
+            raise DomainError("尚无修复计划，无法提交验收")
+        if self.conn.execute(
+            "SELECT 1 FROM fix_acceptances WHERE plan_id=? AND plan_revision=? AND status='pending'",
+            (plan["id"], plan["revision"]),
+        ).fetchone():
+            raise DomainError("当前计划已有待确认的验收")
+        now = datetime.now().isoformat()
+        with self.transaction():
+            cur = self.conn.execute(
+                "INSERT INTO fix_acceptances(report_id,plan_id,plan_revision,plan,target_date,maintainer_id,note,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (report_id, plan["id"], plan["revision"], plan["plan"], plan["target_date"], maintainer_id, note.strip(), now),
+            )
+            self._notify_coordinators(
+                report_id, "acceptance",
+                f"维护者已提交 {report['public_id']} 当前修复计划（第 {plan['revision']} 版）的完成确认，待验收",
+            )
+        return int(cur.lastrowid)
+
+    def confirm_fix_acceptance(self, report_id: int, acceptance_id: int, coordinator_id: int) -> None:
+        actor = self._user(coordinator_id)
+        if actor["role"] != "coordinator":
+            raise DomainError("只有协调员可以确认修复验收")
+        acceptance = self.conn.execute(
+            "SELECT * FROM fix_acceptances WHERE id=? AND report_id=?", (acceptance_id, report_id)
+        ).fetchone()
+        if not acceptance:
+            raise DomainError("验收记录不存在")
+        if acceptance["status"] != "pending":
+            raise DomainError("该验收已处理，不能重复确认")
+        now = datetime.now().isoformat()
+        with self.transaction():
+            self.conn.execute(
+                "UPDATE fix_acceptances SET status='confirmed',confirmed_by=?,resolved_at=? WHERE id=?",
+                (coordinator_id, now, acceptance_id),
+            )
+            self.conn.execute("UPDATE fix_plans SET status='done' WHERE id=?", (acceptance["plan_id"],))
+            self._notify(report_id, acceptance["maintainer_id"], "acceptance", "修复验收已通过协调员确认，可以标记为已解决")
 
     def extend_embargo(self, report_id: int, new_deadline: str, reason: str, coordinator_id: int) -> int:
         actor = self._user(coordinator_id)
@@ -460,6 +559,10 @@ class VulnerabilityDB:
             "INSERT INTO notifications(report_id,user_id,kind,message,created_at) VALUES(?,?,?,?,?)",
             (report_id, user_id, kind, message, datetime.now().isoformat()),
         )
+
+    def _notify_coordinators(self, report_id: int, kind: str, message: str) -> None:
+        for row in self.conn.execute("SELECT id FROM users WHERE role='coordinator'").fetchall():
+            self._notify(report_id, row["id"], kind, message)
 
     def notifications_for(self, user_id: int) -> list[dict]:
         return [dict(row) for row in self.conn.execute(
